@@ -109,10 +109,18 @@ arkade get kubectl
 # Download a specific version of that tool
 arkade get kubectl@v1.22.0
 
+# Download last version of this tool
+arkade get kubectl@latest
+
 # Download multiple tools at once
 arkade get kubectl \
   helm \
   istioctl
+
+# Download last version of several tools at once
+arkade get kubectl \
+  helm \
+  istioctl --version latest
 
 # Download multiple specific versions
 arkade get faas-cli@0.13.15 \

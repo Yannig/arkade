@@ -1,6 +1,7 @@
 package get
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"text/template"
 	"time"
@@ -17,6 +19,18 @@ import (
 
 var supportedOS = [...]string{"linux", "darwin", "ming"}
 var supportedArchitectures = [...]string{"x86_64", "arm", "amd64", "armv6l", "armv7l", "arm64", "aarch64"}
+
+// Strings used to autodetect archive compatibility with os and arch
+// OS Strings
+var linuxStrings = []string{"linux"}
+var windowsStrings = []string{"windows", ".exe"}
+var macStrings = []string{"osx", "darwin", "mac"}
+
+// Arch strings
+var arch32bitStrings = []string{"linux32", "win32"}
+var arch64bitStrings = []string{"amd64", "linux64", "win64"}
+var archARM7Strings = []string{"armv7", "arm-v7", "arm"}
+var archARM64Strings = []string{"arm64"}
 
 // Tool describes how to download a CLI tool from a binary
 // release - whether a single binary, or an archive.
@@ -68,7 +82,7 @@ func (tool Tool) IsArchive() (bool, error) {
 	arch, operatingSystem := env.GetClientArch()
 	version := ""
 
-	downloadURL, err := GetDownloadURL(&tool, strings.ToLower(operatingSystem), strings.ToLower(arch), version)
+	downloadURL, version, err := GetDownloadURL(&tool, strings.ToLower(operatingSystem), strings.ToLower(arch), version)
 	if err != nil {
 		return false, err
 	}
@@ -78,17 +92,141 @@ func (tool Tool) IsArchive() (bool, error) {
 		strings.HasSuffix(downloadURL, "tgz"), nil
 }
 
-// GetDownloadURL fetches the download URL for a release of a tool
-// for a given os, architecture and version
-func GetDownloadURL(tool *Tool, os, arch, version string) (string, error) {
-	ver := getToolVersion(tool, version)
+func isOsCompatible(release, os string) bool {
+	var incompatibleStrings []string
+	var osStrings []string
 
-	dlURL, err := tool.GetURL(os, arch, ver)
+	if strings.Contains(os, "linux") {
+		osStrings = linuxStrings
+		incompatibleStrings = append(windowsStrings, macStrings...)
+	} else if strings.Contains(os, "darwin") {
+		osStrings = macStrings
+		incompatibleStrings = append(linuxStrings, windowsStrings...)
+	} else if strings.Contains(os, "mingw") {
+		osStrings = windowsStrings
+		incompatibleStrings = append(linuxStrings, macStrings...)
+	} else {
+		return false
+	}
+	// Exclude release for non-compatible os
+	for _, excludeString := range incompatibleStrings {
+		if strings.Contains(release, excludeString) {
+			return false
+		}
+	}
+	// Check if something is compatible for us
+	for _, osString := range osStrings {
+		if strings.Contains(release, osString) {
+			return true
+		}
+	}
+	// If we are here, the release is incompatible ...
+	return false
+}
+
+func isArchCompatible(release, arch string) bool {
+	var incompatibleStrings []string
+	var archStrings []string
+
+	if strings.Contains(arch, "i686") {
+		archStrings = arch32bitStrings
+		incompatibleStrings = append(arch64bitStrings, archARM7Strings...)
+		incompatibleStrings = append(incompatibleStrings, archARM64Strings...)
+	} else if strings.Contains(arch, "x86_64") {
+		archStrings = arch64bitStrings
+		incompatibleStrings = append(arch32bitStrings, archARM7Strings...)
+		incompatibleStrings = append(incompatibleStrings, archARM64Strings...)
+	} else if strings.Contains(arch, "armv7l") {
+		archStrings = archARM7Strings
+		incompatibleStrings = append(arch32bitStrings, arch64bitStrings...)
+		incompatibleStrings = append(incompatibleStrings, archARM64Strings...)
+	} else if strings.Contains(arch, "aarch64") {
+		archStrings = archARM7Strings
+		incompatibleStrings = append(arch32bitStrings, arch64bitStrings...)
+		incompatibleStrings = append(incompatibleStrings, archARM64Strings...)
+	} else {
+		log.Printf("Cannot handle arch %s", arch)
+	}
+	// Exclude release for non-compatible os
+	for _, excludeString := range incompatibleStrings {
+		if strings.Contains(release, excludeString) {
+			return false
+		}
+	}
+	// Check if something is compatible for us
+	for _, osString := range archStrings {
+		if strings.Contains(release, osString) {
+			return true
+		}
+	}
+	return false
+}
+
+func (tool Tool) getGithubReleaseArchive(os, arch, version string) (string, error) {
+
+	archives := make([]string, 0)
+
+	url := fmt.Sprintf("https://github.com/%s/%s/releases/tag/%s", tool.Owner, tool.Repo, version)
+
+	timeout := time.Second * 5
+	client := makeHTTPClient(&timeout, false)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
 
-	return dlURL, nil
+	res, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
+
+	if res.StatusCode != 200 {
+		return "", fmt.Errorf("incorrect status code: %d", res.StatusCode)
+	}
+
+	expr := fmt.Sprintf(".*href=\"(/%s/%s/releases/download/[^\"]+)\".*", tool.Owner, tool.Repo)
+	re := regexp.MustCompile(expr)
+
+	buffer := bufio.NewScanner(res.Body)
+	for buffer.Scan() {
+		if re.Match(buffer.Bytes()) {
+			context := re.ReplaceAllString(buffer.Text(), "$1")
+			if !isOsCompatible(context, os) || !isArchCompatible(context, arch) {
+				continue
+			}
+			fmt.Printf("Archive %s seems to be compatible with %s/%s\n", context, os, arch)
+			archives = append(archives, fmt.Sprintf("https://github.com%s", context))
+		}
+	}
+	if len(archives) == 0 {
+		return "", fmt.Errorf(
+			"no release found for %s on os(%s)/arch(%s) using version %s", tool.Name, os, arch, version)
+	} else if len(archives) > 1 {
+		return "", fmt.Errorf(
+			"found multiple release for %s on os(%s)/arch(%s) using version %s", tool.Name, os, arch, version)
+	}
+	return archives[0], nil
+}
+
+// GetDownloadURL fetches the download URL for a release of a tool
+// for a given os, architecture and version
+func GetDownloadURL(tool *Tool, os, arch, version string) (string, string, error) {
+	ver := getToolVersion(tool, version)
+
+	dlURL, ver, err := tool.GetURL(os, arch, ver)
+	if err != nil {
+		return "", "", err
+	}
+
+	return dlURL, ver, nil
 }
 
 func getToolVersion(tool *Tool, version string) string {
@@ -100,16 +238,17 @@ func getToolVersion(tool *Tool, version string) string {
 	return ver
 }
 
-func (tool Tool) GetURL(os, arch, version string) (string, error) {
+func (tool Tool) GetURL(os, arch, version string) (string, string, error) {
 
-	if len(version) == 0 &&
+	if strings.Compare(version, "latest") == 0 || len(version) == 0 &&
 		(len(tool.URLTemplate) == 0 || strings.Contains(tool.URLTemplate, "https://github.com/")) {
 		log.Printf("Looking up version for %s", tool.Name)
 		v, err := findGitHubRelease(tool.Owner, tool.Repo)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		log.Printf("Found: %s", v)
+		tool.Version = v
 		version = v
 	}
 
@@ -120,14 +259,14 @@ func (tool Tool) GetURL(os, arch, version string) (string, error) {
 	return getURLByGithubTemplate(tool, os, arch, version)
 }
 
-func getURLByGithubTemplate(tool Tool, os, arch, version string) (string, error) {
+func getURLByGithubTemplate(tool Tool, os, arch, version string) (string, string, error) {
 
 	var err error
 	t := template.New(tool.Name + "binary")
 	t = t.Funcs(templateFuncs)
 	t, err = t.Parse(tool.BinaryTemplate)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	var buf bytes.Buffer
@@ -141,12 +280,12 @@ func getURLByGithubTemplate(tool Tool, os, arch, version string) (string, error)
 
 	err = t.Execute(&buf, pref)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	downloadName := strings.TrimSpace(buf.String())
 
-	return getBinaryURL(tool.Owner, tool.Repo, version, downloadName), nil
+	return getBinaryURL(tool.Owner, tool.Repo, version, downloadName), version, nil
 }
 
 func findGitHubRelease(owner, repo string) (string, error) {
@@ -196,13 +335,13 @@ func getBinaryURL(owner, repo, version, downloadName string) string {
 		owner, repo, version, downloadName)
 }
 
-func getByDownloadTemplate(tool Tool, os, arch, version string) (string, error) {
+func getByDownloadTemplate(tool Tool, os, arch, version string) (string, string, error) {
 	var err error
 	t := template.New(tool.Name)
 	t = t.Funcs(templateFuncs)
 	t, err = t.Parse(tool.URLTemplate)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	var buf bytes.Buffer
@@ -217,11 +356,11 @@ func getByDownloadTemplate(tool Tool, os, arch, version string) (string, error) 
 	}
 
 	if err := t.Execute(&buf, inputs); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	res := strings.TrimSpace(buf.String())
-	return res, nil
+	return res, version, nil
 }
 
 // makeHTTPClient makes a HTTP client with good defaults for timeouts.

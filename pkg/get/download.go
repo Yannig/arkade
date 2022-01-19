@@ -23,7 +23,7 @@ const (
 
 func Download(tool *Tool, arch, operatingSystem, version string, downloadMode int, displayProgress bool) (string, string, error) {
 
-	downloadURL, err := GetDownloadURL(tool,
+	downloadURL, version, err := GetDownloadURL(tool,
 		strings.ToLower(operatingSystem),
 		strings.ToLower(arch),
 		version)
@@ -35,7 +35,19 @@ func Download(tool *Tool, arch, operatingSystem, version string, downloadMode in
 
 	outFilePath, err := downloadFile(downloadURL, displayProgress)
 	if err != nil {
-		return "", "", err
+		fmt.Printf("Error while downloading template URL (%s)\n", downloadURL)
+		fmt.Printf("Try to autodetect archive url in Github release\n")
+		autodetectedUrl, err := tool.getGithubReleaseArchive(
+			strings.ToLower(operatingSystem), strings.ToLower(arch), version)
+		if err != nil {
+			return "", "", fmt.Errorf("unknown version %s for %s in Github", version, tool.Name)
+		}
+		fmt.Printf("Autodetect archive name inside Github: %s\n", autodetectedUrl)
+		// Try to download it
+		outFilePath, err = downloadFile(autodetectedUrl, displayProgress)
+		if err != nil {
+			return "", "", err
+		}
 	}
 	fmt.Printf("%s written.\n", outFilePath)
 
