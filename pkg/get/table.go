@@ -16,9 +16,13 @@ const (
 )
 
 // CreateToolTable creates table to show the avaiable CLI tools
-func CreateToolsTable(tools Tools, format TableFormat) {
+func CreateToolsTable(tools Tools, format TableFormat, showVersion bool) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Tool", "Description"})
+	header := []string{"Tool", "Description"}
+	if showVersion {
+		header = append(header, "Version")
+	}
+	table.SetHeader(header)
 	table.SetCaption(true,
 		fmt.Sprintf("There are %d apps, use 'arkade get NAME' to download one.", len(tools)))
 	if format == MarkdownStyle {
@@ -34,7 +38,11 @@ func CreateToolsTable(tools Tools, format TableFormat) {
 	}
 
 	for _, t := range tools {
-		table.Append([]string{t.Name, t.Description})
+		columns := []string{t.Name, t.Description}
+		if showVersion {
+			columns = append(columns, t.Version)
+		}
+		table.Append(columns)
 	}
 
 	table.Render()

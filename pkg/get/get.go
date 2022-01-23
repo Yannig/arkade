@@ -9,6 +9,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	netUrl "net/url"
+	"path"
 	"regexp"
 	"strings"
 	"text/template"
@@ -26,7 +28,7 @@ var macStrings = []string{"osx", "darwin", "mac"}
 
 // Arch strings
 var arch32bitStrings = []string{"linux32", "win32"}
-var arch64bitStrings = []string{"amd64", "linux64", "win64"}
+var arch64bitStrings = []string{"amd64", "x86_64", "linux64", "win64", "64bit"}
 var archARMStrings = []string{"armv7", "arm-v7", "armv6"}
 var archARM64Strings = []string{"arm64"}
 
@@ -74,12 +76,22 @@ type ToolLocal struct {
 
 var templateFuncs = map[string]interface{}{
 	"HasPrefix": func(s, prefix string) bool { return strings.HasPrefix(s, prefix) },
+	"Replace":   func(s, m, r string) string { return strings.Replace(s, m, r, -1) },
+}
+
+func isExcluded(release string) bool {
+	staticExcludeList := []string{".sha256", ".md5sum", ".txt", ".deb", ".rpm", ".sig", ".sbom"}
+	for _, exclude := range staticExcludeList {
+		if strings.HasSuffix(release, exclude) {
+			return true
+		}
+	}
+	return false
 }
 
 func isOsCompatible(release, os string) bool {
 	var excludeList []string
 	var matchList []string
-
 	if strings.Contains(os, "linux") {
 		matchList = linuxStrings
 		excludeList = append(windowsStrings, macStrings...)
@@ -124,6 +136,7 @@ func isArchCompatible(release, arch string) bool {
 }
 
 func _isCompatible(release string, excludeList, matchList []string) bool {
+	release = strings.ToLower(release)
 	// Exclude release with exclude list keyword
 	for _, exclude := range excludeList {
 		if strings.Contains(release, exclude) {
@@ -174,17 +187,55 @@ func (tool Tool) getGithubReleaseArchive(os, arch, version string) (string, erro
 	re := regexp.MustCompile(expr)
 
 	buffer := bufio.NewScanner(res.Body)
+	singleBinaryContext := ""
 	for buffer.Scan() {
 		if re.Match(buffer.Bytes()) {
-			context := re.ReplaceAllString(buffer.Text(), "$1")
-			if !isOsCompatible(context, os) || !isArchCompatible(context, arch) {
+			context, _ := netUrl.QueryUnescape(re.ReplaceAllString(buffer.Text(), "$1"))
+			releaseUrl := fmt.Sprintf("https://github.com%s", context)
+			// Check if simple binary exist used for Linux amd64 binary like for arkade
+			if strings.HasSuffix(context, "/"+tool.Name) {
+				println("Single binary context detected", context)
+				singleBinaryContext = releaseUrl
+				continue
+			}
+			if isExcluded(context) || !isOsCompatible(context, os) || !isArchCompatible(context, arch) {
 				continue
 			}
 			fmt.Printf("Archive %s seems to be compatible with %s/%s\n", context, os, arch)
-			archives = append(archives, fmt.Sprintf("https://github.com%s", context))
+			if len(archives) == 0 {
+				archives = append(archives, releaseUrl)
+				continue
+			}
+			if len(archives) == 1 {
+				// If binary start with the product name and not the previous one, we take the new one
+				if strings.HasPrefix(path.Base(context), tool.Name) &&
+					!strings.HasPrefix(path.Base(archives[0]), tool.Name) {
+					fmt.Println("New archive seems to be a better candidate. Removing previous one.")
+					archives[0] = releaseUrl
+					continue
+				}
+				// And ignoring new archive without good prefix but existing one have good prefix
+				if !strings.HasPrefix(path.Base(context), tool.Name) &&
+					strings.HasPrefix(path.Base(archives[0]), tool.Name) {
+					fmt.Println("Previous archive seems to be a better candidate. Ignoring this one.")
+					continue
+				}
+				// Something already there, so skip it (ex: minikube, osm)
+				if IsArchive(context) {
+					fmt.Println("Binary/archive already detected. Skipping.")
+					continue
+				}
+			}
+			archives = append(archives, releaseUrl)
 		}
 	}
 	if len(archives) == 0 {
+		// Special case for Linux/AMD64 where binary is tool's name
+		if len(singleBinaryContext) > 0 &&
+			(strings.Compare(os, "linux") == 0) &&
+			(strings.Compare(arch, "x86_64") == 0) {
+			return singleBinaryContext, nil
+		}
 		return "", fmt.Errorf(
 			"no release found for %s on os(%s)/arch(%s) using version %s", tool.Name, os, arch, version)
 	} else if len(archives) > 1 {
@@ -216,8 +267,7 @@ func getToolVersion(tool *Tool, version string) string {
 
 func (tool Tool) GetURL(os, arch, version string) (string, error) {
 
-	if len(version) == 0 &&
-		(len(tool.URLTemplate) == 0 || strings.Contains(tool.URLTemplate, "https://github.com/")) {
+	if len(version) == 0 {
 		log.Printf("Looking up version for %s", tool.Name)
 		v, err := findGitHubRelease(tool.Owner, tool.Repo)
 		if err != nil {
@@ -230,8 +280,10 @@ func (tool Tool) GetURL(os, arch, version string) (string, error) {
 	if len(tool.URLTemplate) > 0 {
 		return getByDownloadTemplate(tool, os, arch, version)
 	}
-
-	return getURLByGithubTemplate(tool, os, arch, version)
+	if len(tool.BinaryTemplate) > 0 {
+		return getURLByGithubTemplate(tool, os, arch, version)
+	}
+	return tool.getGithubReleaseArchive(os, arch, version)
 }
 
 func getURLByGithubTemplate(tool Tool, os, arch, version string) (string, error) {

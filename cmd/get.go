@@ -59,26 +59,27 @@ and provides a fast and easy alternative to a package manager.`,
 	command.Flags().StringP("output", "o", "", "Output format of the list of tools (table/markdown/list)")
 	command.Flags().Bool("stash", true, "When set to true, stash binary in HOME/.arkade/bin/, otherwise store in /tmp/")
 	command.Flags().StringP("version", "v", "", "Download a specific version")
+	command.Flags().Bool("showVersion", false, "When set to true, show tool version")
 	command.Flags().String("arch", clientArch, "CPU architecture for the tool")
 	command.Flags().String("os", clientOS, "Operating system for the tool")
 
 	command.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			output, _ := command.Flags().GetString("output")
-
+			showVersion := true
 			if len(output) > 0 {
 				if get.TableFormat(output) == get.MarkdownStyle {
-					get.CreateToolsTable(tools, get.MarkdownStyle)
+					get.CreateToolsTable(tools, get.MarkdownStyle, showVersion)
 				} else if get.TableFormat(output) == get.ListStyle {
 					for _, r := range tools {
 						fmt.Printf("%s\n", r.Name)
 					}
 
 				} else {
-					get.CreateToolsTable(tools, get.TableStyle)
+					get.CreateToolsTable(tools, get.TableStyle, showVersion)
 				}
 			} else {
-				get.CreateToolsTable(tools, get.TableStyle)
+				get.CreateToolsTable(tools, get.TableStyle, showVersion)
 			}
 			return nil
 		}

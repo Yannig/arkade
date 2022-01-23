@@ -33,3 +33,6 @@ dist:
 .PHONY: hash
 hash:
 	rm -rf bin/*.sha256 && ./hack/hashgen.sh
+
+integration-test:
+	./download-all-tools.sh
